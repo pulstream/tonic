@@ -12,7 +12,7 @@ mod prost;
 
 use crate::Status;
 use std::io;
-
+use bytes::{Bytes, BufMut, Buf};
 pub use self::buffer::{DecodeBuf, EncodeBuf};
 pub use self::compression::{CompressionEncoding, EnabledCompressionEncodings};
 pub use self::decode::Streaming;
@@ -155,5 +155,56 @@ pub trait Decoder {
     /// Controls how tonic creates and expands decode buffers.
     fn buffer_settings(&self) -> BufferSettings {
         BufferSettings::default()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RawBytesCodec;
+
+impl Codec for RawBytesCodec {
+    type Encode = Bytes;
+    type Decode = Bytes;
+    type Encoder = RawBytesEncoder;
+    type Decoder = RawBytesDecoder;
+
+    fn encoder(&mut self) -> Self::Encoder {
+        RawBytesEncoder
+    }
+
+    fn decoder(&mut self) -> Self::Decoder {
+        RawBytesDecoder
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RawBytesEncoder;
+
+impl Encoder for RawBytesEncoder {
+    type Item = Bytes;
+    type Error = Status;
+
+    fn encode(&mut self, item: Self::Item, dst: &mut EncodeBuf<'_>) -> Result<(), Self::Error> {
+        dst.put_slice(&item);
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RawBytesDecoder;
+
+impl Decoder for RawBytesDecoder {
+    type Item = Bytes;
+    type Error = Status;
+
+    fn decode(&mut self, src: &mut DecodeBuf<'_>) -> Result<Option<Self::Item>, Self::Error> {
+        if !src.has_remaining() {
+            return Ok(None);
+        }
+
+        let len = src.remaining();
+        let mut buf = vec![0u8; len];
+        src.copy_to_slice(&mut buf);
+        
+        Ok(Some(Bytes::from(buf)))
     }
 }

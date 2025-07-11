@@ -15,6 +15,8 @@ use http::{
 use http_body::Body as HttpBody;
 use std::{fmt, future, pin::pin};
 use tokio_stream::{Stream, StreamExt};
+use bytes::{Bytes};
+use http_body_util;
 
 /// A gRPC client dispatcher.
 ///
@@ -276,6 +278,58 @@ impl<T> Grpc<T> {
     {
         let request = request.map(|m| tokio_stream::once(m));
         self.streaming(request, path, codec).await
+    }
+
+    ///True zero-copy server streaming method
+    pub async fn server_streaming_raw(
+        &mut self,
+        request: Request<Bytes>,  // Already encoded protobuf bytes
+        path: PathAndQuery,
+    ) -> Result<Response<Streaming<Bytes>>, Status>
+    where
+        T: GrpcService<Body>,
+        T::ResponseBody: HttpBody + Send + 'static,
+        <T::ResponseBody as HttpBody>::Error: Into<crate::BoxError>,
+        T::Error: std::fmt::Debug,
+    {
+        use bytes::BufMut;
+        
+        // Create gRPC frame manually to avoid codec overhead
+        let raw_data = request.into_inner();
+        let mut frame = bytes::BytesMut::with_capacity(5 + raw_data.len());
+        
+        // gRPC frame format: [compression_flag:1][length:4][data:length]
+        frame.put_u8(0); // No compression
+        frame.put_u32(raw_data.len() as u32); // Data length
+        frame.put_slice(&raw_data); // Raw protobuf data
+        
+        // Fix: Create Body using http_body_util::Full
+        let full_body = http_body_util::Full::new(frame.freeze());
+        let body = Body::new(full_body);
+        
+        // Use http::Request::builder() instead of tonic::Request::builder()
+        let http_request = http::Request::builder()
+            .version(http::Version::HTTP_2)
+            .method(http::Method::POST)
+            .uri(format!("{}{}",
+                self.config.origin.path_and_query().map(|pq| pq.as_str()).unwrap_or("/"),
+                path.as_str()
+            ))
+            .header("content-type", "application/grpc")
+            .header("te", "trailers")
+            .body(body)
+            .map_err(|e| Status::internal(format!("Failed to build request: {}", e)))?;
+
+        let response = self
+            .inner
+            .call(http_request)
+            .await
+            .map_err(|err| Status::internal(format!("Service call failed: {:?}", err)))?;
+
+        // Make codec mutable
+        let mut codec = crate::codec::RawBytesCodec;
+        let decoder = codec.decoder();
+        self.create_response(decoder, response)
     }
 
     /// Send a bi-directional streaming gRPC request.
